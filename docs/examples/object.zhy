@@ -1,0 +1,9 @@
+#{
+  Extending an object inherits it's fields and allows the object to be passed
+  to functions that take the parent type as a parameter (unless overloaded).
+}#
+type Person extends object: # `extends object` is implicit
+  name*: string # Field definition, publicly accessible
+  age*: int
+  isDead: bool  # Is not accessible outside of the file
+
