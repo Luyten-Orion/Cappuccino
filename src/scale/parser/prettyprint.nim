@@ -3,7 +3,10 @@ import std/[
   strutils
 ]
 
-import ./types
+import ./[
+  errors,
+  types
+]
 
 type
   AstPrinter* = ref object of Visitor[string]
@@ -12,6 +15,13 @@ type
 template T*(t: typedesc[AstPrinter] | AstPrinter): typedesc[string] = string
 
 template indent(v: AstPrinter): string = repeat("  ", v.depth)
+
+# Quick AST visiting (forward declares)
+func accept*(node: Identifier, v: AstPrinter): string
+func accept*(node: FunctionCall, v: AstPrinter): string
+func accept*(node: Grouping, v: AstPrinter): string
+func accept*(node: Literal, v: AstPrinter): string
+func accept*(node: Expression, v: AstPrinter): string
 
 func visitIdentifier*(v: AstPrinter, node: Identifier): string =
   result = &"`{node.name}`"
@@ -34,8 +44,9 @@ func visitFunctionCall*(v: AstPrinter, node: FunctionCall): string =
 func visitGrouping*(v: AstPrinter, node: Grouping): string =
   result = v.indent & "Grouping(\n"
   inc v.depth
-  result &= v.indent & "Expression: " & node.expression.accept(v) & "\n"
+  result &= v.indent & "Child: " & node.child.accept(v) & "\n"
   dec v.depth
+  result &= v.indent & ")\n"
 
 func visitLiteral*(v: AstPrinter, node: Literal): string =
   case node.litKind
@@ -50,3 +61,28 @@ func visitLiteral*(v: AstPrinter, node: Literal): string =
       result = &"BoolLit {node.boolVal}"
     of Nil:
       result = "NilLit"
+
+func visit*(v: AstPrinter, node: Expression): string =
+  if node == nil:
+    raise newException(ZaphytVisitingError, "Given node is nil!")
+
+  result = case node.kind
+    of AkIdentifier:
+      v.visitIdentifier(node.Identifier)
+    of AkFunctionCall:
+      v.visitFunctionCall(node.FunctionCall)
+    of AkGrouping:
+      v.visitGrouping(node.Grouping)
+    of AkLiteral:
+      v.visitLiteral(node.Literal)
+    else:
+      raise newException(ZaphytVisitingError, "Unimplemented visit call!")
+
+  if result[^1] == '\n':
+    result.setLen(result.len - 1)
+
+func accept*(node: Identifier, v: AstPrinter): string = (if node != nil: v.visitIdentifier(node) else: "...")
+func accept*(node: FunctionCall, v: AstPrinter): string = (if node != nil: v.visitFunctionCall(node) else: "...")
+func accept*(node: Grouping, v: AstPrinter): string = (if node != nil: v.visitGrouping(node) else: "...")
+func accept*(node: Literal, v: AstPrinter): string = (if node != nil: v.visitLiteral(node) else: "...")
+func accept*(node: Expression, v: AstPrinter): string = (if node != nil: v.visit(node) else: "...")

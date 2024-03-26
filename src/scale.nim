@@ -3,12 +3,12 @@ import std/[
   os
 ]
 
-import ./[
+import ./scale/[
   parser,
   lexer
 ]
 
-import ./parser/[
+import ./scale/parser/[
   prettyprint
 ]
 
@@ -32,10 +32,9 @@ var l = newLexer(code)
 
 let tokens = l.lex()
 
-#echo tokens
+echo tokens
 
 let p = newParser(tokens)
 var pretty = AstPrinter()
 var ast = p.parse()
-echo ast == nil
 echo pretty.visit(ast)

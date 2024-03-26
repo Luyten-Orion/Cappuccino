@@ -32,6 +32,7 @@ type
     line, column: uint
     indentFormat: IndentationFormat
     indentStack: seq[int]
+    includeAllComments: bool
 
 const
   SimpleTokenMap = {
@@ -118,7 +119,6 @@ proc newLexer*(stream: Stream): Lexer =
 
 proc lexStr(l: Lexer): Token =
   result = Token(typ: String, startLine: l.line, startColumn: l.column)
-  var lexeme: string
 
   var
     cchar = l.peek()
@@ -141,8 +141,6 @@ proc lexStr(l: Lexer): Token =
     result.value &= cchar
 
     l.next()
-
-  result.value = lexeme
 
   if (cchar != '"') or (cchar == '"' and pchar == '\\'):
     raise newException(ZaphytLexingError,
