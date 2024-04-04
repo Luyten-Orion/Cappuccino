@@ -3,7 +3,7 @@ import std/[
   os
 ]
 
-import ./cappuchino/[
+import ./cappuccino/[
   parser,
   lexer
 ]

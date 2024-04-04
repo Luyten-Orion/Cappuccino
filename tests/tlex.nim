@@ -1,6 +1,6 @@
 import std/[unittest, streams]
 
-import cappuchino/lexer
+import cappuccino/lexer
 
 test "Number lexing":
   echo currentSourcePath()

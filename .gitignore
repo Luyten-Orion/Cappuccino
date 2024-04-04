@@ -1,4 +1,4 @@
-/cappuchino
+/cappuccino
 /tests/*
 !/tests/res
 !/tests/*.nim*
