@@ -1,1 +1,4 @@
-/scale
+/cappuchino
+/tests/*
+!/tests/res
+!/tests/*.nim*

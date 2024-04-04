@@ -3,13 +3,9 @@ import std/[
   os
 ]
 
-import ./scale/[
+import ./cappuchino/[
   parser,
   lexer
-]
-
-import ./scale/parser/[
-  prettyprint
 ]
 
 let fileName = paramStr(1)

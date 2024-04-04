@@ -100,6 +100,25 @@ proc `$`*(tokens: seq[Token]): string =
 
   result &= "\n]"
 
+func `==`*(a, b: Token): bool =
+  # Overload of the `==` operator for `Token`s since system/comparisons doesn't work on case objects
+  result = true
+
+  if a.typ != b.typ:
+    return false
+
+  case a.typ
+    of Path:
+      result = a.subtokens == b.subtokens
+    of {Indent, Dedent, EOF}:
+      discard
+    else:
+      result = a.value == b.value
+  
+  result = result and
+    a.startLine == b.startLine and
+    a.startColumn == b.startColumn
+
 template atEnd(l: Lexer): bool = l.stream.atEnd()
 
 template peek(l: Lexer): char = l.stream.peekChar()
@@ -468,6 +487,7 @@ proc lexUntil(l: Lexer, cond: (proc(l: Lexer): bool) = nil): seq[Token] =
       result.add l.lexIdent()
 
 proc lex*(l: Lexer): seq[Token] =
+  # TODO: Lex comments
   result = l.lexUntil()
 
   for i in 0..<l.indentStack.len:

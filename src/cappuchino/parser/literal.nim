@@ -24,10 +24,8 @@ func parse*(p: Parser): Grouping =
 
   if exr.typ == Int:
     result.child = Literal(kind: AkLiteral, litKind: Integer, intVal: parseInt(exr.value))
-    assert result.child.Literal.intVal == 427321
     p.advance()
   
   elif exr.typ == String:
     result.child = Literal(kind: AkLiteral, litKind: String, strVal: exr.value)
-    assert result.child.Literal.strVal == "Hello, World!"
     p.advance()
