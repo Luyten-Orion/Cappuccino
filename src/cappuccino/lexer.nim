@@ -53,17 +53,17 @@ const
 
   Keywords = @[
     "func",
+    "template",
     "macro",
     "type",
     "object",
     "of",
-    "ref",
     "static",
     "discard"
   ]
 
 proc `$`*(token: Token, depth: int = 1): string =
-  let indent = repeat("  ", depth)
+  let indent = repeat("   ", depth)
   result &= &"Token(\n{indent}typ: {token.typ},\n"
   result &= &"{indent}startLine: {token.startLine},\n"
   result &= &"{indent}startColumn: {token.startColumn},\n"
