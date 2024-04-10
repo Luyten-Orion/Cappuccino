@@ -6,7 +6,7 @@ import std/[
 ]
 
 type
-  ZaphytLexingError* = object of CatchableError
+  CappuccinoLexingError* = object of CatchableError
 
   TokenType* = enum
     OpenParen, CloseParen, OpenBrace, CloseBrace, OpenBracket, CloseBracket, Identifier,
@@ -150,7 +150,7 @@ proc lexStr(l: Lexer): Token =
     cchar = l.peek()
 
     if cchar == '\n':
-      raise newException(ZaphytLexingError,
+      raise newException(CappuccinoLexingError,
         fmt"Unterminated string literal at line {l.line} and column {l.column}!")
 
     if (cchar == '"') and (pchar != '\\'):
@@ -162,7 +162,7 @@ proc lexStr(l: Lexer): Token =
     l.next()
 
   if (cchar != '"') or (cchar == '"' and pchar == '\\'):
-    raise newException(ZaphytLexingError,
+    raise newException(CappuccinoLexingError,
       fmt"Unterminated string literal at line {l.line} and column {l.column}, reached EOF!")
 
 
@@ -209,7 +209,7 @@ proc lexBackticks(l: Lexer): Token =
     cchar = l.peek()
 
     if cchar == '\n':
-      raise newException(ZaphytLexingError,
+      raise newException(CappuccinoLexingError,
         fmt"Unterminated backtick literal at line {l.line} and column {l.column}!")
 
     elif cchar != '`':
@@ -222,7 +222,7 @@ proc lexBackticks(l: Lexer): Token =
     l.next()
 
   if (cchar != '`') or (cchar == '`' and pchar == '\\'):
-    raise newException(ZaphytLexingError,
+    raise newException(CappuccinoLexingError,
       fmt"Unterminated backtick literal at line {l.line} and column {l.column}, reached EOF!")
 
 
@@ -271,7 +271,7 @@ proc lexChar(l: Lexer): Token =
   l.next()
 
   if l.atEnd:
-    raise newException(ZaphytLexingError,
+    raise newException(CappuccinoLexingError,
       fmt"Unterminated character literal at line {l.line} and column {l.column}!")
 
   else:
@@ -283,7 +283,7 @@ proc lexChar(l: Lexer): Token =
       l.next()
 
       if l.atEnd:
-        raise newException(ZaphytLexingError,
+        raise newException(CappuccinoLexingError,
           fmt"Unterminated character literal at line {l.line} and column {l.column}!")
 
       else:
@@ -291,7 +291,7 @@ proc lexChar(l: Lexer): Token =
         cchar = l.peek()
 
         if cchar == '\'' and pchar != '\\':
-          raise newException(ZaphytLexingError,
+          raise newException(CappuccinoLexingError,
             fmt"Unterminated character literal at line {l.line} and column {l.column}!")
 
         else:
@@ -300,7 +300,7 @@ proc lexChar(l: Lexer): Token =
           l.next()
 
     elif cchar == '\'':
-      raise newException(ZaphytLexingError,
+      raise newException(CappuccinoLexingError,
         fmt"Invalid character literal at line {l.line} and column {l.column}!")
 
     else:
@@ -309,7 +309,7 @@ proc lexChar(l: Lexer): Token =
       l.next()
 
   if l.atEnd:
-    raise newException(ZaphytLexingError,
+    raise newException(CappuccinoLexingError,
       fmt"Unterminated character literal at line {l.line} and column {l.column}!")
 
   else:
@@ -317,7 +317,7 @@ proc lexChar(l: Lexer): Token =
     cchar = l.peek()
 
     if cchar != '\'':
-      raise newException(ZaphytLexingError,
+      raise newException(CappuccinoLexingError,
         fmt"Unterminated character literal at line {l.line} and column {l.column}!")
 
   l.next()
@@ -372,7 +372,7 @@ proc lexIndent(l: Lexer): seq[Token] =
         elif cchar == ' ':
           l.indentFormat = Space
         else:
-          raise newException(ZaphytLexingError,
+          raise newException(CappuccinoLexingError,
             fmt"Invalid indentation character at line {l.line} and column {l.column}, got `{cchar}`!")
 
         indentDepth += 1
@@ -381,7 +381,7 @@ proc lexIndent(l: Lexer): seq[Token] =
         if cchar == '\t':
           indentDepth += 1
         else:
-          raise newException(ZaphytLexingError,
+          raise newException(CappuccinoLexingError,
             fmt"Invalid indentation character at line {l.line} and column {l.column}, expected a tab but " &
               fmt"got '{cchar}'!")
 
@@ -389,7 +389,7 @@ proc lexIndent(l: Lexer): seq[Token] =
         if cchar == ' ':
           indentDepth += 1
         else:
-          raise newException(ZaphytLexingError,
+          raise newException(CappuccinoLexingError,
             fmt"Invalid indentation character at line {l.line} and column {l.column}, expected a space but " &
               fmt"got '{cchar}'!")
 
@@ -408,7 +408,7 @@ proc lexIndent(l: Lexer): seq[Token] =
       let indexOfMatchingIndent = l.indentStack.find(indentDepth)
 
       if indexOfMatchingIndent == -1:
-        raise newException(ZaphytLexingError,
+        raise newException(CappuccinoLexingError,
           fmt"Invalid dedentation at line {l.line} and column {l.column}!")
 
       let toPop = l.indentStack[indexOfMatchingIndent..<l.indentStack.len].len
@@ -455,7 +455,7 @@ proc lexUntil(l: Lexer, cond: (proc(l: Lexer): bool) = nil): seq[Token] =
 
     elif cchar == '.':
       if result.len == 0:
-        raise newException(ZaphytLexingError,
+        raise newException(CappuccinoLexingError,
           fmt"Path token found at line {l.line}, column {l.column}, without a token defined before it!")
 
       result.add l.lexPath(result.pop())

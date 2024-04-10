@@ -64,7 +64,7 @@ func visitLiteral*(v: AstPrinter, node: Literal): string =
 
 func visit*(v: AstPrinter, node: Expression): string =
   if node == nil:
-    raise newException(ZaphytVisitingError, "Given node is nil!")
+    raise newException(CappuccinoVisitingError, "Given node is nil!")
 
   result = case node.kind
     of AkIdentifier:
@@ -76,7 +76,7 @@ func visit*(v: AstPrinter, node: Expression): string =
     of AkLiteral:
       v.visitLiteral(node.Literal)
     else:
-      raise newException(ZaphytVisitingError, "Unimplemented visit call!")
+      raise newException(CappuccinoVisitingError, "Unimplemented visit call!")
 
   if result[^1] == '\n':
     result.setLen(result.len - 1)

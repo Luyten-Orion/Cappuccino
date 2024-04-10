@@ -6,12 +6,16 @@ type
     AkIdentifier, AkFunctionCall, AkGrouping, AkLiteral, AkNone
 
   LiteralKind* = enum
-    String, Integer, Float, Boolean, Nil
+    Character, String, Integer, Float, Boolean, Nil
 
 # AST types
 type
+  CnLineInfo* = object
+    line, column*: int
+
   Expression* = ref object of RootObj
     kind*: AstKind = AkNone
+    lineInfo*: CnLineInfo
 
   Identifier* = ref object of Expression
     name*: string
@@ -25,6 +29,8 @@ type
 
   Literal* = ref object of Expression
     case litKind*: LiteralKind
+      of Character:
+        chrVal*: char
       of String:
         strVal*: string
       of Integer:

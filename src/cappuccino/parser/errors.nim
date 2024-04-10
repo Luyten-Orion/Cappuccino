@@ -1,3 +1,3 @@
 type
-  ZaphytParsingError* = object of CatchableError
-  ZaphytVisitingError* = object of CatchableError
+  CappuccinoParsingError* = object of CatchableError
+  CappuccinoVisitingError* = object of CatchableError
