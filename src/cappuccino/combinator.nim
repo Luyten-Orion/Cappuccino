@@ -1,6 +1,6 @@
-import std/[typetraits, parseutils, genasts, macros]
+import std/[parseutils, genasts, macros]
 
-import pkg/[results]
+import ./results
 
 import ./nodes
 
@@ -12,18 +12,78 @@ const
   SpecialIdentifierChars* = "<>,:;!?@$%^&/*+-=~|"
   #UnidentifierChars* = "()[]{}\"'\\`"
 
-
 type
   IntFormat = enum
     Dec, Hex, Bin
 
   ParserCombinationDefect* = object of Defect
 
+  IndentType* = enum
+    itUnset, itSpaces, itTabs
+
+  ParserState* = object
+    nodes*: seq[AstNode]
+    indentType: IndentType = itUnset
+    indentStack, newlineLocs: seq[int]
+
+  ParserFailureCombinatorSide* = enum
+    Left, Right
+
+  ParseFailureSourceKind* = enum
+    pfsIndentParser, pfsIdentifierParser, pfsAccQuoteParser, pfsSpecialIdentifierParser, pfsStringParser, pfsNumberParser,
+    pfsCharacterParser, pfsAndCombinator, pfsOrCombinator, pfsLinkCombinator, pfsMany1Combinator, pfsThen, pfsLabel
+
+  ParseFailureSource* {.acyclic.} = object
+    case kind*: ParseFailureSourceKind
+    of {pfsIndentParser, pfsIdentifierParser, pfsAccQuoteParser, pfsSpecialIdentifierParser, pfsStringParser, pfsNumberParser}:
+      discard
+    of pfsCharacterParser:
+      pChar*: char
+    of pfsAndCombinator:
+      acSide*: ParserFailureCombinatorSide
+      acFailure*: ref ParseFailureSource
+    of pfsOrCombinator:
+      ocLeft*: ref ParseFailureSource
+      ocRight*: ref ParseFailureSource
+    of pfsLinkCombinator:
+      lcFailure*: ref ParseFailureSource
+      lcIndex*: Natural
+    of pfsMany1Combinator:
+      m1Failure*: ref ParseFailureSource
+    of pfsThen:
+      tFailure*: ref ParseFailureSource
+    of pfsLabel:
+      lFailure*: ref ParseFailureSource
+      lName*: string
+      lMsg*: string
+
+  IndentParserFailure* = distinct ParseFailureSource
+  IdentifierParserFailure* = distinct ParseFailureSource
+  AccQuoteParserFailure* = distinct ParseFailureSource
+  SpecialIdentifierParserFailure* = distinct ParseFailureSource
+  StringParserFailure* = distinct ParseFailureSource
+  NumberParserFailure* = distinct ParseFailureSource
+  CharacterParserFailure* = distinct ParseFailureSource
+  AndCombinatorFailure* = distinct ParseFailureSource
+  OrCombinatorFailure* = distinct ParseFailureSource
+  LinkCombinatorFailure* = distinct ParseFailureSource
+  Many1CombinatorFailure* = distinct ParseFailureSource
+  ThenBlockFailure* = distinct ParseFailureSource
+  LabelledFailure* = distinct ParseFailureSource
+
+  ParseFailureSourcesNoParam = IndentParserFailure | IdentifierParserFailure | AccQuoteParserFailure |
+    SpecialIdentifierParserFailure | StringParserFailure | NumberParserFailure
+  CombinatorFailures = AndCombinatorFailure | OrCombinatorFailure | LinkCombinatorFailure | Many1CombinatorFailure
+  MiscFailures = ThenBlockFailure | LabelledFailure
+  ParseFailureSources* = ParseFailureSourcesNoParam | CharacterParserFailure | CombinatorFailures | MiscFailures
+
   ParseFailureKind* = enum
     Unknown, EndOfInput, ExpectedWhitespace, CannotDetectIndentationType, InconsistentIndentationSpacing,
     NotAnIdentifier, ExpectedChar
 
   ParseFailure* = object
+    state: ParserState
+    source*: ParseFailureSource
     position*: Natural
 
     case kind*: ParseFailureKind
@@ -34,53 +94,80 @@ type
     of ExpectedChar:
       ecFoundChar*, ecExpectedChar*: char
 
-  IndentType* = enum
-    itUnset, itSpaces, itTabs
-
-  ParserState* = object
-    astIdx: AstNodeIndex
-    indentStack: seq[int] = @[0]
-    indentType: IndentType = itUnset
-
   ParseSuccess* = object
     state: ParserState
     position*: Natural
-    nodes*: seq[AstNode]
+    nodes*: seq[AstNodeIndex]
 
   ParseResult* = Result[ParseSuccess, ParseFailure]
 
-  Parser* = proc(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult {.noSideEffect, gcsafe.}
+  Parser* = proc(state: sink ParserState, input: openArray[char], position: Natural): ParseResult {.noSideEffect, gcsafe.}
 
-# Flatten proc
-proc flatten(a, b: ParseSuccess): ParseSuccess =
-  ## Flattens two `ParseSuccess` objects into one, requires copying, is there a better way without using a state?
-  result = ParseSuccess(
-    state: b.state,
-    position: b.position,
-    nodes: newSeqOfCap[AstNode](a.nodes.len + a.nodes.len)
-  )
+# Useful converters
+converter toFailureSource*(s: ParseFailureSources): ParseFailureSource = ParseFailureSource(s)
+converter toFailureSource*(s: ref ParseFailureSources): ref ParseFailureSource = (ref ParseFailureSource)(s)
 
-  result.nodes = a.nodes & b.nodes
+# Utility procs
+proc toKind(s: typedesc[ParseFailureSources]): ParseFailureSourceKind =
+  when s is IndentParserFailure: pfsIndentParser
+  elif s is IdentifierParserFailure: pfsIdentifierParser
+  elif s is AccQuoteParserFailure: pfsAccQuoteParser
+  elif s is SpecialIdentifierParserFailure: pfsSpecialIdentifierParser
+  elif s is StringParserFailure: pfsStringParser
+  elif s is NumberParserFailure: pfsNumberParser
+  elif s is CharacterParserFailure: pfsCharacterParser
+  elif s is AndCombinatorFailure: pfsAndCombinator
+  elif s is OrCombinatorFailure: pfsOrCombinator
+  elif s is LinkCombinatorFailure: pfsLinkCombinator
+  elif s is Many1CombinatorFailure: pfsMany1Combinator
+  elif s is ThenBlockFailure: pfsThen
+  elif s is LabelledFailure: pfsLabel
+  else: {.error: "Unreachable `toKind` for `" & $n & "`.".}
 
-# 'Call' just calls `p` and returns the result, flattening as needed
-template call(result: ParseResult, p: Parser, input: openArray[char], errBody: typed, errBodyOnFail: bool = true): ParseResult =
-  ## Calls `p` on `input` and returns the result, using `res` for the offset
-  if result.isOk:
-    let res {.inject.} = p(result.unsafeGet().state, input, result.unsafeGet().position)
-    if res.isOk:
-      ok(flatten(result.get(), res.get()))
-    else:
-      if errBodyOnFail:
-        errBody
-      else:
-        res
-  else:
-    errBody
+proc add(state: var ParserState, node: sink AstNode): AstNodeIndex =
+  state.nodes.add(node)
+  ~state.nodes.high
 
-template call(result: ParseResult, p: Parser, input: openArray[char], errBodyOnFail: bool = true): ParseResult =
-  ## Calls `p` on `input` and returns the result, using `res` for the offset
-  call(result, p, input, result, errBodyOnFail)
+proc toRef[T: ParseFailureSources | ParseFailureSource](src: T): ref T =
+  result = new T
+  result[] = src
 
+func `$`*(src: ref ParseFailureSource): string = (if src == nil: "nil" else: $src[])
+
+# `init` procs
+proc init*(T: typedesc[ParseFailureSourcesNoParam]): T =
+  ## Creates a new `ParseFailureSource` that has no params
+  T(ParseFailureSource(kind: T.toKind))
+
+proc init*(T: typedesc[CharacterParserFailure], pChar: char): T =
+  ## Creates a new `CharacterParserFailure`
+  T(ParseFailureSource(kind: pfsCharacterParser, pChar: pChar))
+
+proc init*(T: typedesc[AndCombinatorFailure], side: ParserFailureCombinatorSide, src: ParseFailureSource): T =
+  ## Creates a new `AndCombinatorFailure`
+  T(ParseFailureSource(kind: pfsAndCombinator, acSide: side, acFailure: src.toRef))
+
+proc init*(T: typedesc[OrCombinatorFailure], left, right: ParseFailureSource): T =
+  ## Creates a new `OrCombinatorFailure`
+  T(ParseFailureSource(kind: pfsOrCombinator, ocLeft: left.toRef, ocRight: right.toRef))
+
+proc init*(T: typedesc[LinkCombinatorFailure], src: ParseFailureSource, idx: Natural): T =
+  ## Creates a new `LinkCombinatorFailure`
+  T(ParseFailureSource(kind: pfsLinkCombinator, lcFailure: src.toRef, lcIndex: idx))
+
+proc init*(T: typedesc[Many1CombinatorFailure], src: ParseFailureSource): T =
+  ## Creates a new `Many1CombinatorFailure`
+  T(ParseFailureSource(kind: pfsMany1Combinator, m1Failure: src.toRef))
+
+proc init*(T: typedesc[ThenBlockFailure], src: ParseFailureSource): T =
+  ## Creates a new `ThenBlockFailure`
+  T(ParseFailureSource(kind: pfsThen, tFailure: src.toRef))
+
+proc init*(T: typedesc[LabelledFailure], src: ParseFailureSource, label: string, msg: string): T =
+  ## Creates a new `LabelledFailure`
+  T(ParseFailureSource(kind: pfsLabel, lFailure: src.toRef, lName: label, lMsg: msg))
+
+proc init*(T: typedesc[ParserState]): T = T(indentStack: @[0])
 
 proc stringify(input: openArray[char]): string =
   ## Helper function that converts `openArray[char]` to a `string`
@@ -88,7 +175,22 @@ proc stringify(input: openArray[char]): string =
   for i in input: result.add i
 
 
-proc parseIndent*(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+func newlineLocator*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
+  ## Finds all the newlines and adds them to the state, then returns the `position` as is.
+  var
+    offset = position
+    currentState = state
+
+  while offset < input.len:
+    if input[offset] == '\n':
+      currentState.newlineLocs.add offset
+
+    inc offset
+
+  ok(ParseSuccess(state: currentState, position: position, nodes: @[]))
+
+
+func parseIndent*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
   ## Parses an indent, input at offset must start with a newline.
   ## It'll only parse spaces or tabs, once it detects one or the other.
   var
@@ -97,15 +199,15 @@ proc parseIndent*(state: ParserState, input: openArray[char], position: Natural 
     currentState = state
 
   while input.len > offset:
-    if input[offset] != '\n': return err(ParseFailure(kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '\n'))
+    if input[offset] != '\n': return err(ParseFailure(state: currentState, source: IndentParserFailure.init(),
+      kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '\n'))
     while input.len > offset and input[offset] == '\n':
       inc offset
 
     if offset >= input.len:
       if currentState.indentStack.len != 1:
         currentState.indentStack.setLen(1)
-        currentState.astIdx += 1
-        return ok(ParseSuccess(state: currentState, position: offset, nodes: @[Dedent.init(currentState.indentStack[0])]))
+        return ok(ParseSuccess(state: currentState, position: offset, nodes: @[currentState.add Dedent.init(currentState.indentStack[0])]))
       return ok(ParseSuccess(state: currentState, position: offset, nodes: @[]))
 
     if currentState.indentType == itUnset:
@@ -124,14 +226,15 @@ proc parseIndent*(state: ParserState, input: openArray[char], position: Natural 
     of itTabs:
       '\t'
     else:
-      return err(ParseFailure(kind: CannotDetectIndentationType))
+      return err(ParseFailure(state: currentState, source: IndentParserFailure.init(), kind: CannotDetectIndentationType))
 
     while input.len >= offset and input[offset] in {' ', '\t'}:
       if input[offset] == ichar:
         inc counter
         inc offset
       else:
-        return err(ParseFailure(kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: ichar))
+        return err(ParseFailure(state: currentState, source: IndentParserFailure.init(),
+          kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: ichar))
 
     if input[offset] == '\n':
       counter = 0
@@ -144,100 +247,141 @@ proc parseIndent*(state: ParserState, input: openArray[char], position: Natural 
     elif counter < currentState.indentStack[^1]:
       let i = currentState.indentStack.find(counter)
       if i == -1:
-        return err(ParseFailure(kind: InconsistentIndentationSpacing))
+        return err(ParseFailure(state: currentState, source: IndentParserFailure.init(), kind: InconsistentIndentationSpacing))
       while counter < currentState.indentStack[^1]:
         if currentState.indentStack.len == 1:
           break
         currentState.indentStack.delete currentState.indentStack.len - 1
     else:
-      return err(ParseFailure(kind: InconsistentIndentationSpacing))
+      return err(ParseFailure(state: currentState, source: IndentParserFailure.init(), kind: InconsistentIndentationSpacing))
 
 
     var
-      idx = currentState.astIdx
-      node: AstNode = if currentState.indentStack.len > lastISLen:
-        Indent.init(currentState.indentStack.len).AstNode
+      node: AstNodeIndex = if currentState.indentStack.len > lastISLen:
+        currentState.add Indent.init(currentState.indentStack.len).AstNode
       elif currentState.indentStack.len < lastISLen:
-        Dedent.init(currentState.indentStack.len).AstNode
+        currentState.add Dedent.init(currentState.indentStack.len).AstNode
       else:
         return ok(ParseSuccess(state: currentState, position: offset, nodes: @[]))
 
-    currentState.astIdx += 1
-    result = ok(ParseSuccess(state: currentState, position: offset, nodes: @[node]))
-    break
+    return ok(ParseSuccess(state: currentState, position: offset, nodes: @[node]))
 
 
-proc parseIdentifier*(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+func parseIdentifier*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
   ## Parses an identifier from `input` starting at `position`
-  var offset = position
+  var
+    offset = position
+    currentState = state
 
-  if offset >= input.len: return err(ParseFailure(kind: EndOfInput, position: offset))
+  if offset >= input.len: return err(ParseFailure(state: currentState, source: IdentifierParserFailure.init(),
+    kind: EndOfInput, position: offset))
   elif input[offset] notin IdentifierInitialChars:
-    return err(ParseFailure(kind: NotAnIdentifier, naiChar: input[offset], position: offset))
+    return err(ParseFailure(state: currentState, source: IdentifierParserFailure.init(), kind: NotAnIdentifier,
+      naiChar: input[offset], position: offset))
 
   while offset < input.len and input[offset] in IdentifierChars: inc offset
 
-  ok(ParseSuccess(state: state, position: offset, nodes: @[Identifier.init(input[position..<offset].stringify)]))
+  ok(ParseSuccess(state: currentState, position: offset, nodes: @[currentState.add Identifier.init(input[position..<offset].stringify)]))
 
 
-proc parseAccQuote*(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+func parseAccQuote*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
   ## Parses an accQuote from `input` starting at `position`
-  var offset = position
+  var
+    offset = position
+    currentState = state
 
-  if offset >= input.len: return err(ParseFailure(kind: EndOfInput, position: offset))
+  if offset >= input.len: return err(ParseFailure(state: currentState, kind: EndOfInput, position: offset))
 
   if input[offset] != '`':
-    return err(ParseFailure(kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
+    return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(),
+      kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
   inc offset
 
   while offset < input.len and input[offset] != '`':
     if input[offset] == '\n':
-      return err(ParseFailure(kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
+      return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(),
+        kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
     inc offset
 
-  if offset >= input.len: return err(ParseFailure(kind: EndOfInput, position: offset))
+  if offset >= input.len: return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(),
+    kind: EndOfInput, position: offset))
 
   if input[offset] != '`':
-    return err(ParseFailure(kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
+    return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(),
+      kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
   inc offset
 
-  ok(ParseSuccess(state: state, position: offset, nodes: @[AccQuote.init(input[(position + 1)..<(offset - 1)].stringify)]))
+  let
+    ident = currentState.add Identifier.init(input[(position + 1)..<(offset - 1)].stringify)
+    accQuote = currentState.add AccQuote.init(ident)
+
+  ok(ParseSuccess(state: currentState, position: offset, nodes: @[accQuote]))
 
 
-proc parseString*(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+func parseSpecialIdentifier*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
+  ## Parses a special identifier from `input` starting at `position`
+  var
+    offset = position
+    currentState = state
+
+  if offset >= input.len: return err(ParseFailure(state: currentState, source: SpecialIdentifierParserFailure.init(),
+    kind: EndOfInput, position: offset))
+
+  if input[offset] notin SpecialIdentifierChars:
+    return err(ParseFailure(state: currentState, source: SpecialIdentifierParserFailure.init(),
+      kind: NotAnIdentifier, naiChar: input[offset], position: offset))
+
+  while offset < input.len and input[offset] in SpecialIdentifierChars: inc offset
+
+  let idx = currentState.add Identifier.init(input[position..<offset].stringify)
+  ok(ParseSuccess(state: currentState, position: offset, nodes: @[idx]))
+
+
+func parseString*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
   ## Parses a string from `input` starting at `position`
-  var offset = position
+  var
+    offset = position
+    currentState = state
 
-  if offset >= input.len: return err(ParseFailure(kind: EndOfInput, position: offset))
+  if offset >= input.len: return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
+    kind: EndOfInput, position: offset))
 
   if input[offset] != '"':
-    return err(ParseFailure(kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '"', position: offset))
+    return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
+      kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '"', position: offset))
   inc offset
 
   while offset < input.len and input[offset] != '"':
     if input[offset] == '\n':
-      return err(ParseFailure(kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
+      return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
+        kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
     inc offset
 
-  if offset >= input.len: return err(ParseFailure(kind: EndOfInput, position: offset))
+  if offset >= input.len: return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
+    kind: EndOfInput, position: offset))
 
   if input[offset] != '"':
-    return err(ParseFailure(kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '"', position: offset))
+    return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
+      kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '"', position: offset))
   inc offset
 
-  ok(ParseSuccess(state: state, position: offset, nodes: @[String.init(input[(position + 1)..<(offset - 1)].stringify)]))
+  let str = currentState.add String.init(input[(position + 1)..<(offset - 1)].stringify)
+
+  ok(ParseSuccess(state: currentState, position: offset, nodes: @[str]))
 
 
-proc parseNumber*(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+func parseNumber*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
   ## Parses a number from `input` starting at `position`
   ##
   ## TODO: Handle overflow
   var
     offset = position
+    currentState = state
     numFormat = Dec
     isFloat = false
 
-  if offset > input.len: return err(ParseFailure(kind: EndOfInput, position: offset))
+  if offset > input.len: return err(ParseFailure(state: currentState, source: NumberParserFailure.init(),
+    kind: EndOfInput, position: offset))
 
   if input[offset] == '0' and (offset + 1) < input.len:
     if input[offset + 1] in {'x', 'X'}:
@@ -271,21 +415,27 @@ proc parseNumber*(state: ParserState, input: openArray[char], position: Natural 
     input[position..<offset].parseBin(intVal)
 
   if offset < input.len and input[offset] != ' ':
-    return err(ParseFailure(kind: ExpectedWhitespace, position: offset))
+    return err(ParseFailure(state: currentState, source: NumberParserFailure.init(),
+      kind: ExpectedWhitespace, position: offset))
 
-  if isFloat:
-    ok(ParseSuccess(state: state, position: offset, nodes: @[Float.init(floatVal)]))
+  let idx = if isFloat:
+    currentState.add Float.init(floatVal)
   else:
-    ok(ParseSuccess(state: state, position: offset, nodes: @[Int.init(intVal)]))
+    currentState.add Int.init(intVal)
+
+  ok(ParseSuccess(state: currentState, position: offset, nodes: @[idx]))
 
 
 proc charParser*(c: char): Parser =
   ## Creates a parser that parses a single character `c`
-  proc parseCharacter(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+  func parseCharacter(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
     ## Creates a parser that parses a single character `c`
-    if position >= input.len: return err(ParseFailure(kind: EndOfInput, position: position))
-    elif input[position] == c: ok(ParseSuccess(state: state, position: position + 1, nodes: @[]))
-    else: err(ParseFailure(kind: ExpectedChar, ecExpectedChar: c, ecFoundChar: input[position], position: position))
+    var currentState = state
+    if position >= input.len: return err(ParseFailure(state: currentState, source: CharacterParserFailure.init(c),
+      kind: EndOfInput, position: position))
+    elif input[position] == c: ok(ParseSuccess(state: currentState, position: position + 1, nodes: @[]))
+    else: err(ParseFailure(state: currentState, source: CharacterParserFailure.init(c),
+      kind: ExpectedChar, ecExpectedChar: c, ecFoundChar: input[position], position: position))
 
   parseCharacter
 
@@ -293,10 +443,22 @@ proc charParser*(c: char): Parser =
 macro `and`*(a, b: Parser): Parser =
   ## Combines parsers `a` and `b`, running `b` only if `a` succeeds.
   genAst(a, b, andCombinator=genSym(nskProc, "andCombinator"), result=ident("result")) do:
-    proc andCombinator(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+    func andCombinator(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
       ## Runs parsers `a` and `b`, running `b` only if `a` succeeds.
       result = a(state, input, position)
-      result = result.call(b, input, errBodyOnFail=false)
+      if result.isErr:
+        result.unsafeError().source = AndCombinatorFailure.init(Left, result.unsafeError().source)
+        return
+
+      let nodes = result.unsafeGet().nodes
+      result = b(result.unsafeGet().state, input, result.unsafeGet().position)
+
+      if result.isErr:
+        result.unsafeError().source = AndCombinatorFailure.init(Right, result.unsafeError().source)
+        return
+
+      result.unsafeGet().nodes = nodes & result.unsafeGet().nodes
+      
 
     andCombinator
 
@@ -304,11 +466,14 @@ macro `and`*(a, b: Parser): Parser =
 macro `or`*(a, b: Parser): Parser =
   ## Combines parsers `a` and `b`, running `b` after `a` only if `a` fails.
   genAst(a, b, orCombinator=genSym(nskProc, "orCombinator"), result=ident("result")) do:
-    proc orCombinator(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+    func orCombinator(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
       ## Runs parsers `a` or `b`, running `b` only if `a` fails.
       result = a(state, input, position)
       if result.isErr:
-        result = b(state, input, position)
+        let srcA = result.unsafeError().source
+        result = b(result.unsafeError().state, input, position)
+        if result.isErr:
+          result.unsafeError().source = OrCombinatorFailure.init(srcA, result.unsafeError().source)
 
     orCombinator
 
@@ -320,12 +485,23 @@ proc link*(ps: varargs[Parser]): Parser =
 
   let parsers = @ps
 
-  proc linkCombinator(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+  func linkCombinator(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
     ## Combines parsers `a` and `b`, running `b` only if `a` fails.
+    var
+      idx = 0
+
     result = parsers[0](state, input, position)
 
     for p in parsers[1..^1]:
-      result = result.call(p, input)
+      if result.isErr:
+        let src = result.unsafeError().source
+        result.unsafeError().source = LinkCombinatorFailure.init(src, idx)
+        break
+      inc idx
+      let nodes = result.unsafeGet().nodes
+      result = p(result.unsafeGet().state, input, result.unsafeGet().position)
+      if result.isOk:
+        result.unsafeGet().nodes = nodes & result.unsafeGet().nodes
 
   linkCombinator
 
@@ -334,71 +510,96 @@ macro then*(p: Parser, input: untyped{nkIdent}, body): Parser =
   ## Creates a parser that runs `p` and then any code passed to the `body`
   let thenBlock = genSym(nskProc, "thenBlock")
 
+  # TODO: ThenBlockFailure?
   genAst(thenBlock, result=ident("result")) do:
-    proc thenBlock(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+    func thenBlock(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
       ## Runs the given parser, and on success then runs `body`.
       result = p(state, input, position)
 
       if result.isOk:
         body
+        if result.isErr:
+          result.unsafeError().source = ThenBlockFailure.init(result.unsafeError().source)
 
     thenBlock
 
 
-macro label*(p: Parser, name: static string): Parser =
-  ## Creates a parser that creates a function with the specified `name` and then executes `p`
+macro label*(p: Parser, name: static string, msg: string): Parser =
+  ## Creates a parser that creates a function with the specified `name` and then executes `p`, uses `msg` as the
+  ## error message if `p` fails.
   let functionName = genSym(nskProc, name)
 
-  genAst(p, functionName, result=ident("result")) do:
-    proc functionName(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+  genAst(p, msg, functionName, result=ident("result"), name=($name)) do:
+    func functionName(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
       ## A labelled parser that runs the given parser.
       result = p(state, input, position)
+      if result.isErr:
+        result.unsafeError().source = LabelledFailure.init(result.unsafeError().source, name, msg)
 
     functionName
 
+template label*(p: Parser, name: static string): Parser =
+  ## Creates a parser that creates a function with the specified `name` and then executes `p`
+  label(p, name, "<`" & name & "` wasn't provided with an error message.>")
 
 proc lift*(p: ParseResult): Parser =
   ## Generates a parser that returns the given `ParseResult`, lifting it.
-  proc liftCombinator(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+  # TODO: ThenBlockFailure?
+  func liftCombinator(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
     ## Returns the given `ParseResult`, lifting it.
-    result = p
+    if p.isOk:
+      ok(ParseSuccess(state: state, position: position, nodes: p.unsafeGet().nodes))
+    else:
+      var res = p
+      res.unsafeError().state = state
+      res
 
   liftCombinator
 
 
 proc optional*(p: Parser): Parser =
   ## Creates a parser that runs `p` exactly once, but still returns okay if the parsing fails
-  proc optionalCombinator(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+  func optionalCombinator(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
     ## Runs `p` exactly once, but still returns okay if the parsing fails
     result = p(state, input, position)
     if result.isErr:
-      result = ok(ParseSuccess(state: state, position: position, nodes: @[]))
+      result = ok(ParseSuccess(state: result.unsafeError().state, position: position, nodes: @[]))
 
   optionalCombinator
 
+
 proc many0*(p: Parser): Parser =
   ## Creates a parser that runs `p` 0 or more times
-  proc many0Combinator(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+  func many0Combinator(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
     ## Runs `p` 0 or more times
     result = ok(ParseSuccess(state: state, position: position, nodes: @[]))
 
     while result.isOk:
-      let res = result.call(p, input): break
+      let res = p(result.unsafeGet().state, input, result.unsafeGet().position)
+      if res.isErr: break
+      let nodes = result.unsafeGet().nodes
       result = res
+      result.unsafeGet().nodes = nodes & result.unsafeGet().nodes
 
   many0Combinator
 
 
 proc many1*(p: Parser): Parser =
   ## Creates a parser that runs `p` 1 or more times
-  proc many1Combinator(state: ParserState, input: openArray[char], position: Natural = 0): ParseResult =
+  func many1Combinator(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
     ## Runs `p` 1 or more times
     result = p(state, input, position)
 
+    if result.isErr:
+      result.unsafeError().source = Many1CombinatorFailure.init(result.unsafeError().source)
+
     while result.isOk:
-      let res = result.call(p, input) do: break
+      let res = p(result.unsafeGet().state, input, result.unsafeGet().position)
+      if res.isErr: break
+      let nodes = result.unsafeGet().nodes
       result = res
+      result.unsafeGet().nodes = nodes & result.unsafeGet().nodes
 
   many1Combinator
 
-const skipWhitespace* = static(many0(charParser(' ')).label("skipWhitespace"))
+const skipWhitespace* = many0(charParser(' ')).label("skipWhitespace")

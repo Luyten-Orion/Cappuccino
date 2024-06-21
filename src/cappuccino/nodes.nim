@@ -2,10 +2,10 @@ import std/sequtils
 
 type
   AstNodeKind* = enum
-    ankIdentifier, ankAccQuote, ankString, ankInt, ankFloat, ankCall, ankInfix, ankPrefix,
-    ankIndent, ankDedent
+    anIdentifier, anString, anAccQuote, anInt, anFloat, anCall, anInfix, anPrefix,
+    anIndent, anDedent
 
-const ankCallKinds* = {ankCall, ankInfix, ankPrefix}
+const anCallKinds* = {anCall, anInfix, anPrefix}
 
 type
   AstBuilderDefect* = object of Defect
@@ -14,20 +14,23 @@ type
 
   AstNode* = object
     case kind*: AstNodeKind
-    of {ankIdentifier, ankAccQuote, ankString}:
+    of {anIdentifier, anString}:
       strVal*: string
 
-    of ankInt:
+    of anAccQuote:
+      accQuote*: AstNodeIndex
+
+    of anInt:
       intVal*: int64
 
-    of ankFloat:
+    of anFloat:
       floatVal*: float64
 
-    of ankCallKinds:
+    of anCallKinds:
       caller*: AstNodeIndex
       callees*: seq[AstNodeIndex]
     
-    of ankIndent, ankDedent:
+    of anIndent, anDedent:
       depth*: int
 
   Identifier* = distinct AstNode
@@ -56,16 +59,16 @@ proc `+=`*(n: var AstNodeIndex, offset: int) = n = n + offset
 proc `-=`*(n: var AstNodeIndex, offset: int) = n = n - offset
 
 template toKind(n: typedesc[AstNodes]): AstNodeKind =
-  when n is Identifier: ankIdentifier
-  elif n is AccQuote: ankAccQuote
-  elif n is String: ankString
-  elif n is Int: ankInt
-  elif n is Float: ankFloat
-  elif n is Call: ankCall
-  elif n is Infix: ankInfix
-  elif n is Prefix: ankPrefix
-  elif n is Indent: ankIndent
-  elif n is Dedent: ankDedent
+  when n is Identifier: anIdentifier
+  elif n is AccQuote: anAccQuote
+  elif n is String: anString
+  elif n is Int: anInt
+  elif n is Float: anFloat
+  elif n is Call: anCall
+  elif n is Infix: anInfix
+  elif n is Prefix: anPrefix
+  elif n is Indent: anIndent
+  elif n is Dedent: anDedent
   else: {.error: "Unreachable `toKind` for `" & $n & "`.".}
 
 # Converters to make life slightly easier
@@ -73,19 +76,23 @@ converter toAstNode*(n: AstNodes): AstNode = AstNode(n)
 converter toAstNode*(ns: seq[AstNodes]): seq[AstNode] = ns.mapIt(AstNode(it))
 
 # Initialisers for AST nodes, distinct nodes provide type safety and nicer syntax :)
-proc init*(T: typedesc[Identifier | AccQuote | String], val: string): T =
-  ## Initializes an `Identifier`, `AccQuote` or `String` from `val`
+proc init*(T: typedesc[Identifier | String], val: string): T =
+  ## Initializes an `Identifier` or `String` from `val`
   T(AstNode(kind: T.toKind, strVal: val))
+
+proc init*(T: typedesc[AccQuote], val: AstNodeIndex): T =
+  ## Initializes an `AccQuote` from `val`
+  T(AstNode(kind: T.toKind, accQuote: val))
 
 proc init*(_: typedesc[Int], val: SomeInteger): Int =
   ## Initializes an `Int` from `val`
-  Int(AstNode(kind: ankInt, intVal: val))
+  Int(AstNode(kind: anInt, intVal: val))
 
 proc init*(_: typedesc[Float], val: SomeFloat): Int =
   ## Initializes a `Float` from `val`
-  Int(AstNode(kind: ankFloat, floatVal: val))
+  Int(AstNode(kind: anFloat, floatVal: val))
 
-proc init*[T: AstCalls](_: typedesc[T], caller: AstNodeIndex, callees: varargs[AstNodeIndex]): T =
+proc init*(T: typedesc[AstCalls], caller: AstNodeIndex, callees: varargs[AstNodeIndex]): T =
   ## Initializes any given `AstCall` from `caller` and `callees`, though `Prefix` must always have one callee
   when T is Prefix:
     if callees.len != 1:
