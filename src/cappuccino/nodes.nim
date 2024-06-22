@@ -1,5 +1,7 @@
 import std/sequtils
 
+import pkg/results
+
 type
   AstNodeKind* = enum
     anIdentifier, anString, anAccQuote, anInt, anFloat, anCall, anInfix, anPrefix,
@@ -12,7 +14,11 @@ type
 
   AstNodeIndex* = distinct int
 
+  AstLineInfo* = tuple[line, column: int, fileName: Opt[string]]
+
   AstNode* = object
+    lineInfo*: AstLineInfo
+
     case kind*: AstNodeKind
     of {anIdentifier, anString}:
       strVal*: string
@@ -51,6 +57,16 @@ type
   AstNodes* = AstExprs | AstIndents
 
 # Utility procs
+func pretty*(lineInfo: AstLineInfo): string =
+  result = "["
+
+  if lineInfo.fileName.isSome:
+    result &= lineInfo.fileName.unsafeGet() & ':'
+  else:
+    result &= "<string>:"
+  
+  result &= $lineInfo.line & ':' & $lineInfo.column & ']'
+
 func `$`*(node: AstNodeIndex): string = '~' & (let n = int(node); if n < 0: '(' & $n & ')' else: $n)
 func `~`*(n: int): AstNodeIndex = AstNodeIndex(n)
 func `+`*(n: AstNodeIndex, offset: int): AstNodeIndex = AstNodeIndex(int(n) + offset)
@@ -76,30 +92,30 @@ converter toAstNode*(n: AstNodes): AstNode = AstNode(n)
 converter toAstNode*(ns: seq[AstNodes]): seq[AstNode] = ns.mapIt(AstNode(it))
 
 # Initialisers for AST nodes, distinct nodes provide type safety and nicer syntax :)
-proc init*(T: typedesc[Identifier | String], val: string): T =
+proc init*(T: typedesc[Identifier | String], val: string, lineInfo: AstLineInfo): T =
   ## Initializes an `Identifier` or `String` from `val`
-  T(AstNode(kind: T.toKind, strVal: val))
+  T(AstNode(lineInfo: lineInfo, kind: T.toKind, strVal: val))
 
-proc init*(T: typedesc[AccQuote], val: AstNodeIndex): T =
+proc init*(T: typedesc[AccQuote], val: AstNodeIndex, lineInfo: AstLineInfo): T =
   ## Initializes an `AccQuote` from `val`
-  T(AstNode(kind: T.toKind, accQuote: val))
+  T(AstNode(lineInfo: lineInfo, kind: T.toKind, accQuote: val))
 
-proc init*(_: typedesc[Int], val: SomeInteger): Int =
+proc init*(_: typedesc[Int], val: SomeInteger, lineInfo: AstLineInfo): Int =
   ## Initializes an `Int` from `val`
-  Int(AstNode(kind: anInt, intVal: val))
+  Int(AstNode(lineInfo: lineInfo, kind: anInt, intVal: val))
 
-proc init*(_: typedesc[Float], val: SomeFloat): Int =
+proc init*(_: typedesc[Float], val: SomeFloat, lineInfo: AstLineInfo): Int =
   ## Initializes a `Float` from `val`
-  Int(AstNode(kind: anFloat, floatVal: val))
+  Int(AstNode(lineInfo: lineInfo, kind: anFloat, floatVal: val))
 
-proc init*(T: typedesc[AstCalls], caller: AstNodeIndex, callees: varargs[AstNodeIndex]): T =
+proc init*(T: typedesc[AstCalls], caller: AstNodeIndex, callees: varargs[AstNodeIndex], lineInfo: AstLineInfo): T =
   ## Initializes any given `AstCall` from `caller` and `callees`, though `Prefix` must always have one callee
   when T is Prefix:
     if callees.len != 1:
       raise newException(AstBuilderDefect, "Prefix must have exactly one callee!")
 
-  T(AstNode(kind: T.toKind, caller: caller, callees: callees.toSeq))
+  T(AstNode(lineInfo: lineInfo, kind: T.toKind, caller: caller, callees: callees.toSeq))
 
-proc init*[T: AstIndents](_: typedesc[T], depth: int): T =
+proc init*[T: AstIndents](_: typedesc[T], depth: int, lineInfo: AstLineInfo): T =
   ## Initializes any given `AstIndent` from `depth`
-  T(AstNode(kind: T.toKind, depth: depth))
+  T(AstNode(lineInfo: lineInfo, kind: T.toKind, depth: depth))

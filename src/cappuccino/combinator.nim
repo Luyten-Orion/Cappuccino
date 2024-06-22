@@ -1,6 +1,6 @@
-import std/[parseutils, genasts, macros]
+import std/[parseutils, strutils, genasts, tables, macros]
 
-import ./results
+import pkg/results
 
 import ./nodes
 
@@ -9,8 +9,7 @@ const
   ## The set of characters that can be used as an identifier's starting character
   IdentifierInitialChars* = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
   IdentifierChars* = IdentifierInitialChars & "0123456789_"
-  SpecialIdentifierChars* = "<>,:;!?@$%^&/*+-=~|"
-  #UnidentifierChars* = "()[]{}\"'\\`"
+  SpecialIdentifierChars* = "<>,:;!?@$%^&/*+-=~|({'" & '"'
 
 type
   IntFormat = enum
@@ -21,23 +20,74 @@ type
   IndentType* = enum
     itUnset, itSpaces, itTabs
 
+  Precedence* = distinct uint8
+
+template `@`*(i: int): Precedence = Precedence(i)
+
+# TODO: Replace operator precedence with hardcoded tables with precedence declaration in the language's stdlib
+const
+  UnaryPrecedence*: OrderedTable[string, Precedence] = {
+    "@": @12,  # Iterator-like types to mutable lists
+    "$": @10,  # `toString`
+    "not": @6, # Boolean algebra and bitops
+    "+": @0,
+    "-": @0
+  }.toOrderedTable
+
+  InfixPrecedence*: OrderedTable[string, Precedence] = {
+    ".": @11,  # Field access and custom dot operators
+    "^": @10,  # Exponentiation
+    "/": @9,
+    "*": @9,
+    "shl": @8,
+    "shr": @8,
+    "+": @8,
+    "-": @8,
+    "..<": @7, # Also for slicing, but it takes away 1 from the right hand side, useful for `0..<myArray.len`
+    "..": @7,  # Range/slice operator, useful for getting slices of arrays or substrings
+    "<": @6,
+    ">": @6,
+    "<=": @6,
+    ">=": @6,
+    "!=": @6,
+    "==": @6,
+    "in": @6,
+    "notin": @6,
+    "is": @6,
+    "isnot": @6,
+    "and": @5, # Boolean algebra and bitops
+    "&": @5,   # String concatenation and typeclasses
+    "xor": @4, # Boolean algebra and bitops
+    "or": @4,  # Boolean algebra and bitops
+    "|": @4,   # Purely for typeclasses
+    "!": @3,   # For result types, `Ok!Error`, `Ok` being the type returned on success, `Error` being the type returned on failure
+    "=": @2    # Assignment and assignment-like operators should have the lowest precedence
+  }.toOrderedTable
+
+  PostfixPrecedence*: OrderedTable[string, Precedence] = {
+    "?": @3 # Used for `Option` types.
+  }.toOrderedTable
+
+type
   ParserState* = object
     nodes*: seq[AstNode]
     indentType: IndentType = itUnset
     indentStack, newlineLocs: seq[int]
+    unaryPrecedence*, infixPrecedence*, postfixPrecedence*: OrderedTable[string, Precedence]
 
   ParserFailureCombinatorSide* = enum
     Left, Right
 
   ParseFailureSourceKind* = enum
-    pfsIndentParser, pfsIdentifierParser, pfsAccQuoteParser, pfsSpecialIdentifierParser, pfsStringParser, pfsNumberParser,
+    pfsIndentParser, pfsIdentifierParser, pfsAccQuoteParser, pfsStringParser, pfsNumberParser,
     pfsCharacterParser, pfsAndCombinator, pfsOrCombinator, pfsLinkCombinator, pfsMany1Combinator, pfsThen, pfsLabel
 
   ParseFailureSource* {.acyclic.} = object
     case kind*: ParseFailureSourceKind
-    of {pfsIndentParser, pfsIdentifierParser, pfsAccQuoteParser, pfsSpecialIdentifierParser, pfsStringParser, pfsNumberParser}:
-      discard
+    of {pfsIndentParser, pfsIdentifierParser, pfsAccQuoteParser, pfsStringParser, pfsNumberParser}:
+      npLineInfo*: AstLineInfo
     of pfsCharacterParser:
+      pLineInfo*: AstLineInfo
       pChar*: char
     of pfsAndCombinator:
       acSide*: ParserFailureCombinatorSide
@@ -60,7 +110,6 @@ type
   IndentParserFailure* = distinct ParseFailureSource
   IdentifierParserFailure* = distinct ParseFailureSource
   AccQuoteParserFailure* = distinct ParseFailureSource
-  SpecialIdentifierParserFailure* = distinct ParseFailureSource
   StringParserFailure* = distinct ParseFailureSource
   NumberParserFailure* = distinct ParseFailureSource
   CharacterParserFailure* = distinct ParseFailureSource
@@ -72,7 +121,7 @@ type
   LabelledFailure* = distinct ParseFailureSource
 
   ParseFailureSourcesNoParam = IndentParserFailure | IdentifierParserFailure | AccQuoteParserFailure |
-    SpecialIdentifierParserFailure | StringParserFailure | NumberParserFailure
+    StringParserFailure | NumberParserFailure
   CombinatorFailures = AndCombinatorFailure | OrCombinatorFailure | LinkCombinatorFailure | Many1CombinatorFailure
   MiscFailures = ThenBlockFailure | LabelledFailure
   ParseFailureSources* = ParseFailureSourcesNoParam | CharacterParserFailure | CombinatorFailures | MiscFailures
@@ -108,11 +157,10 @@ converter toFailureSource*(s: ParseFailureSources): ParseFailureSource = ParseFa
 converter toFailureSource*(s: ref ParseFailureSources): ref ParseFailureSource = (ref ParseFailureSource)(s)
 
 # Utility procs
-proc toKind(s: typedesc[ParseFailureSources]): ParseFailureSourceKind =
+template toKind(s: typedesc[ParseFailureSources]): ParseFailureSourceKind =
   when s is IndentParserFailure: pfsIndentParser
   elif s is IdentifierParserFailure: pfsIdentifierParser
   elif s is AccQuoteParserFailure: pfsAccQuoteParser
-  elif s is SpecialIdentifierParserFailure: pfsSpecialIdentifierParser
   elif s is StringParserFailure: pfsStringParser
   elif s is NumberParserFailure: pfsNumberParser
   elif s is CharacterParserFailure: pfsCharacterParser
@@ -128,20 +176,81 @@ proc add(state: var ParserState, node: sink AstNode): AstNodeIndex =
   state.nodes.add(node)
   ~state.nodes.high
 
-proc toRef[T: ParseFailureSources | ParseFailureSource](src: T): ref T =
+
+proc toRef[T: ParseFailureSources | ParseFailureSource](src: sink T): ref T =
   result = new T
   result[] = src
 
+
+func lineInfo*(failure: ParseFailureSource): AstLineInfo =
+  ## Returns the line info of the `ParseFailureSource`, will iterate through the nodes until it finds the line info.
+  var src = failure.toRef
+
+  while true:
+    if src == nil:
+      raise newException(ValueError, "No lineinfo found!")
+
+    case (src[]).kind
+    of {pfsIndentParser, pfsIdentifierParser, pfsAccQuoteParser, pfsStringParser, pfsNumberParser}:
+      result = failure.npLineInfo
+      break
+    of pfsCharacterParser:
+      result = src.pLineInfo
+      break
+    of pfsAndCombinator:
+      src = src.acFailure
+    of pfsOrCombinator:
+      src = src.ocLeft
+    of pfsLinkCombinator:
+      src = src.lcFailure
+    of pfsMany1Combinator:
+      src = src.m1Failure
+    of pfsThen:
+      src = src.tFailure
+    of pfsLabel:
+      src = src.lFailure
+
+
+func lineInfoAt*(state: ParserState, position: Natural): AstLineInfo =
+  ## Returns the line info using the given `position`, searching through `state.newlineLocs`,
+  ## requires calling `newlineLocator` first if multiple lines are given.
+  result = (0, 0, Opt.none(string))
+
+  if state.newlineLocs.len == 0:
+    # Returns the first line always, since we can prove there are no newlines in the state.
+    result.line = 1
+    result.column = position + 1
+    return
+
+  # `newlineLocs` stores the positions of all newlines in the file, so we use this to find the appropriate line
+  for i in state.newlineLocs:
+    if i >= position: break
+    inc result.line
+
+  # Lines are offset by 1
+  inc result.line
+
+  # Columns are offset by 1, also we determine the column by using the found line as the index
+  result.column = (position - state.newlineLocs[result.line - 1] + 1)
+
+
+func stringify(input: openArray[char]): string =
+  ## Helper function that converts `openArray[char]` to a `string`
+  result = newStringOfCap(input.len)
+  for i in input: result.add i
+
+
 func `$`*(src: ref ParseFailureSource): string = (if src == nil: "nil" else: $src[])
+func `$`*(p: Precedence): string = '@' & $uint8(p)
 
 # `init` procs
-proc init*(T: typedesc[ParseFailureSourcesNoParam]): T =
+proc init*(T: typedesc[ParseFailureSourcesNoParam], lineInfo: AstLineInfo): T =
   ## Creates a new `ParseFailureSource` that has no params
-  T(ParseFailureSource(kind: T.toKind))
+  T(ParseFailureSource(npLineInfo: lineInfo, kind: T.toKind))
 
-proc init*(T: typedesc[CharacterParserFailure], pChar: char): T =
+proc init*(T: typedesc[CharacterParserFailure], pChar: char, lineInfo: AstLineInfo): T =
   ## Creates a new `CharacterParserFailure`
-  T(ParseFailureSource(kind: pfsCharacterParser, pChar: pChar))
+  T(ParseFailureSource(pLineInfo: lineInfo, kind: pfsCharacterParser, pChar: pChar))
 
 proc init*(T: typedesc[AndCombinatorFailure], side: ParserFailureCombinatorSide, src: ParseFailureSource): T =
   ## Creates a new `AndCombinatorFailure`
@@ -167,12 +276,8 @@ proc init*(T: typedesc[LabelledFailure], src: ParseFailureSource, label: string,
   ## Creates a new `LabelledFailure`
   T(ParseFailureSource(kind: pfsLabel, lFailure: src.toRef, lName: label, lMsg: msg))
 
-proc init*(T: typedesc[ParserState]): T = T(indentStack: @[0])
-
-proc stringify(input: openArray[char]): string =
-  ## Helper function that converts `openArray[char]` to a `string`
-  result = newStringOfCap(input.len)
-  for i in input: result.add i
+proc init*(T: typedesc[ParserState]): T = T(indentStack: @[0], unaryPrecedence: UnaryPrecedence,
+  infixPrecedence: InfixPrecedence, postfixPrecedence: PostfixPrecedence)
 
 
 func newlineLocator*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
@@ -199,15 +304,17 @@ func parseIndent*(state: sink ParserState, input: openArray[char], position: Nat
     currentState = state
 
   while input.len > offset:
-    if input[offset] != '\n': return err(ParseFailure(state: currentState, source: IndentParserFailure.init(),
-      kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '\n'))
+    if input[offset] != '\n': return err(ParseFailure(state: currentState,
+      source: IndentParserFailure.init(currentState.lineInfoAt(position)), kind: ExpectedChar, ecFoundChar: input[offset],
+      ecExpectedChar: '\n'))
     while input.len > offset and input[offset] == '\n':
       inc offset
 
     if offset >= input.len:
       if currentState.indentStack.len != 1:
         currentState.indentStack.setLen(1)
-        return ok(ParseSuccess(state: currentState, position: offset, nodes: @[currentState.add Dedent.init(currentState.indentStack[0])]))
+        let idx = currentState.add Dedent.init(currentState.indentStack[0], currentState.lineInfoAt(position))
+        return ok(ParseSuccess(state: currentState, position: offset, nodes: @[idx]))
       return ok(ParseSuccess(state: currentState, position: offset, nodes: @[]))
 
     if currentState.indentType == itUnset:
@@ -226,14 +333,15 @@ func parseIndent*(state: sink ParserState, input: openArray[char], position: Nat
     of itTabs:
       '\t'
     else:
-      return err(ParseFailure(state: currentState, source: IndentParserFailure.init(), kind: CannotDetectIndentationType))
+      return err(ParseFailure(state: currentState, source: IndentParserFailure.init(currentState.lineInfoAt(position)),
+      kind: CannotDetectIndentationType))
 
     while input.len >= offset and input[offset] in {' ', '\t'}:
       if input[offset] == ichar:
         inc counter
         inc offset
       else:
-        return err(ParseFailure(state: currentState, source: IndentParserFailure.init(),
+        return err(ParseFailure(state: currentState, source: IndentParserFailure.init(currentState.lineInfoAt(position)),
           kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: ichar))
 
     if input[offset] == '\n':
@@ -247,20 +355,22 @@ func parseIndent*(state: sink ParserState, input: openArray[char], position: Nat
     elif counter < currentState.indentStack[^1]:
       let i = currentState.indentStack.find(counter)
       if i == -1:
-        return err(ParseFailure(state: currentState, source: IndentParserFailure.init(), kind: InconsistentIndentationSpacing))
+        return err(ParseFailure(state: currentState, source: IndentParserFailure.init(currentState.lineInfoAt(position)),
+          kind: InconsistentIndentationSpacing))
       while counter < currentState.indentStack[^1]:
         if currentState.indentStack.len == 1:
           break
         currentState.indentStack.delete currentState.indentStack.len - 1
     else:
-      return err(ParseFailure(state: currentState, source: IndentParserFailure.init(), kind: InconsistentIndentationSpacing))
+      return err(ParseFailure(state: currentState, source: IndentParserFailure.init(currentState.lineInfoAt(position)),
+        kind: InconsistentIndentationSpacing))
 
 
     var
       node: AstNodeIndex = if currentState.indentStack.len > lastISLen:
-        currentState.add Indent.init(currentState.indentStack.len).AstNode
+        currentState.add Indent.init(currentState.indentStack.len, currentState.lineInfoAt(position))
       elif currentState.indentStack.len < lastISLen:
-        currentState.add Dedent.init(currentState.indentStack.len).AstNode
+        currentState.add Dedent.init(currentState.indentStack.len, currentState.lineInfoAt(position))
       else:
         return ok(ParseSuccess(state: currentState, position: offset, nodes: @[]))
 
@@ -273,15 +383,25 @@ func parseIdentifier*(state: sink ParserState, input: openArray[char], position:
     offset = position
     currentState = state
 
-  if offset >= input.len: return err(ParseFailure(state: currentState, source: IdentifierParserFailure.init(),
-    kind: EndOfInput, position: offset))
-  elif input[offset] notin IdentifierInitialChars:
-    return err(ParseFailure(state: currentState, source: IdentifierParserFailure.init(), kind: NotAnIdentifier,
+  if offset >= input.len: return err(ParseFailure(state: currentState,
+    source: IdentifierParserFailure.init(currentState.lineInfoAt(position)), kind: EndOfInput, position: offset))
+  elif input[offset] notin IdentifierInitialChars & SpecialIdentifierChars:
+    return err(ParseFailure(state: currentState, source: IdentifierParserFailure.init(currentState.lineInfoAt(position)),
+      kind: NotAnIdentifier,
       naiChar: input[offset], position: offset))
 
-  while offset < input.len and input[offset] in IdentifierChars: inc offset
+  if input[offset] in SpecialIdentifierChars:
+    while offset < input.len and input[offset] in SpecialIdentifierChars: inc offset
+  else:
+    while offset < input.len and input[offset] in IdentifierChars: inc offset
 
-  ok(ParseSuccess(state: currentState, position: offset, nodes: @[currentState.add Identifier.init(input[position..<offset].stringify)]))
+  if offset < input.len:
+    if input[offset] notin "\n\t " & SpecialIdentifierChars & IdentifierChars:
+      return err(ParseFailure(state: currentState, source: IdentifierParserFailure.init(currentState.lineInfoAt(position)),
+        kind: ExpectedWhitespace, position: offset))
+
+  let idx = currentState.add Identifier.init(input[position..<offset].stringify, currentState.lineInfoAt(position))
+  ok(ParseSuccess(state: currentState, position: offset, nodes: @[idx]))
 
 
 func parseAccQuote*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
@@ -293,48 +413,29 @@ func parseAccQuote*(state: sink ParserState, input: openArray[char], position: N
   if offset >= input.len: return err(ParseFailure(state: currentState, kind: EndOfInput, position: offset))
 
   if input[offset] != '`':
-    return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(),
+    return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(currentState.lineInfoAt(position)),
       kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
   inc offset
 
   while offset < input.len and input[offset] != '`':
     if input[offset] == '\n':
-      return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(),
+      return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(currentState.lineInfoAt(position)),
         kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
     inc offset
 
-  if offset >= input.len: return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(),
-    kind: EndOfInput, position: offset))
+  if offset >= input.len: return err(ParseFailure(state: currentState,
+    source: AccQuoteParserFailure.init(currentState.lineInfoAt(position)), kind: EndOfInput, position: offset))
 
   if input[offset] != '`':
-    return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(),
+    return err(ParseFailure(state: currentState, source: AccQuoteParserFailure.init(currentState.lineInfoAt(position)),
       kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
   inc offset
 
   let
-    ident = currentState.add Identifier.init(input[(position + 1)..<(offset - 1)].stringify)
-    accQuote = currentState.add AccQuote.init(ident)
+    ident = currentState.add Identifier.init(input[(position + 1)..<(offset - 1)].stringify, currentState.lineInfoAt(position + 1))
+    accQuote = currentState.add AccQuote.init(ident, currentState.lineInfoAt(position))
 
   ok(ParseSuccess(state: currentState, position: offset, nodes: @[accQuote]))
-
-
-func parseSpecialIdentifier*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
-  ## Parses a special identifier from `input` starting at `position`
-  var
-    offset = position
-    currentState = state
-
-  if offset >= input.len: return err(ParseFailure(state: currentState, source: SpecialIdentifierParserFailure.init(),
-    kind: EndOfInput, position: offset))
-
-  if input[offset] notin SpecialIdentifierChars:
-    return err(ParseFailure(state: currentState, source: SpecialIdentifierParserFailure.init(),
-      kind: NotAnIdentifier, naiChar: input[offset], position: offset))
-
-  while offset < input.len and input[offset] in SpecialIdentifierChars: inc offset
-
-  let idx = currentState.add Identifier.init(input[position..<offset].stringify)
-  ok(ParseSuccess(state: currentState, position: offset, nodes: @[idx]))
 
 
 func parseString*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
@@ -343,31 +444,37 @@ func parseString*(state: sink ParserState, input: openArray[char], position: Nat
     offset = position
     currentState = state
 
-  if offset >= input.len: return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
-    kind: EndOfInput, position: offset))
+  if offset >= input.len: return err(ParseFailure(state: currentState,
+    source: StringParserFailure.init(currentState.lineInfoAt(position)), kind: EndOfInput, position: offset))
 
   if input[offset] != '"':
-    return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
+    return err(ParseFailure(state: currentState, source: StringParserFailure.init(currentState.lineInfoAt(position)),
       kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '"', position: offset))
   inc offset
 
   while offset < input.len and input[offset] != '"':
     if input[offset] == '\n':
-      return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
+      return err(ParseFailure(state: currentState, source: StringParserFailure.init(currentState.lineInfoAt(position)),
         kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '`', position: offset))
     inc offset
 
-  if offset >= input.len: return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
-    kind: EndOfInput, position: offset))
+  if offset >= input.len: return err(ParseFailure(state: currentState,
+    source: StringParserFailure.init(currentState.lineInfoAt(position)), kind: EndOfInput, position: offset))
 
   if input[offset] != '"':
-    return err(ParseFailure(state: currentState, source: StringParserFailure.init(),
+    return err(ParseFailure(state: currentState, source: StringParserFailure.init(currentState.lineInfoAt(position)),
       kind: ExpectedChar, ecFoundChar: input[offset], ecExpectedChar: '"', position: offset))
   inc offset
+  if offset < input.len:
+    inc offset
+    if input[offset] notin "\n\t " & SpecialIdentifierChars:
+      return err(ParseFailure(state: currentState, source: StringParserFailure.init(currentState.lineInfoAt(position)),
+        kind: ExpectedWhitespace, position: offset))
 
-  let str = currentState.add String.init(input[(position + 1)..<(offset - 1)].stringify)
+  let idx = currentState.add String.init(input[(position + 1)..<(offset - 1)].stringify,
+    currentState.lineInfoAt(position))
 
-  ok(ParseSuccess(state: currentState, position: offset, nodes: @[str]))
+  ok(ParseSuccess(state: currentState, position: offset, nodes: @[idx]))
 
 
 func parseNumber*(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
@@ -380,8 +487,8 @@ func parseNumber*(state: sink ParserState, input: openArray[char], position: Nat
     numFormat = Dec
     isFloat = false
 
-  if offset > input.len: return err(ParseFailure(state: currentState, source: NumberParserFailure.init(),
-    kind: EndOfInput, position: offset))
+  if offset > input.len: return err(ParseFailure(state: currentState,
+    source: NumberParserFailure.init(currentState.lineInfoAt(position)), kind: EndOfInput, position: offset))
 
   if input[offset] == '0' and (offset + 1) < input.len:
     if input[offset + 1] in {'x', 'X'}:
@@ -414,14 +521,15 @@ func parseNumber*(state: sink ParserState, input: openArray[char], position: Nat
     while offset < input.len and input[offset] in {'0'..'1', '_'}: inc offset
     input[position..<offset].parseBin(intVal)
 
-  if offset < input.len and input[offset] != ' ':
-    return err(ParseFailure(state: currentState, source: NumberParserFailure.init(),
-      kind: ExpectedWhitespace, position: offset))
+  if offset < input.len:
+    if input[offset] notin "\n\t " & SpecialIdentifierChars:
+      return err(ParseFailure(state: currentState, source: NumberParserFailure.init(currentState.lineInfoAt(position)),
+        kind: ExpectedWhitespace, position: offset))
 
   let idx = if isFloat:
-    currentState.add Float.init(floatVal)
+    currentState.add Float.init(floatVal, currentState.lineInfoAt(position))
   else:
-    currentState.add Int.init(intVal)
+    currentState.add Int.init(intVal, currentState.lineInfoAt(position))
 
   ok(ParseSuccess(state: currentState, position: offset, nodes: @[idx]))
 
@@ -431,10 +539,10 @@ proc charParser*(c: char): Parser =
   func parseCharacter(state: sink ParserState, input: openArray[char], position: Natural): ParseResult =
     ## Creates a parser that parses a single character `c`
     var currentState = state
-    if position >= input.len: return err(ParseFailure(state: currentState, source: CharacterParserFailure.init(c),
-      kind: EndOfInput, position: position))
+    if position >= input.len: return err(ParseFailure(state: currentState,
+      source: CharacterParserFailure.init(c, currentState.lineInfoAt(position)), kind: EndOfInput, position: position))
     elif input[position] == c: ok(ParseSuccess(state: currentState, position: position + 1, nodes: @[]))
-    else: err(ParseFailure(state: currentState, source: CharacterParserFailure.init(c),
+    else: err(ParseFailure(state: currentState, source: CharacterParserFailure.init(c, currentState.lineInfoAt(position)),
       kind: ExpectedChar, ecExpectedChar: c, ecFoundChar: input[position], position: position))
 
   parseCharacter
@@ -534,7 +642,10 @@ macro label*(p: Parser, name: static string, msg: string): Parser =
       ## A labelled parser that runs the given parser.
       result = p(state, input, position)
       if result.isErr:
-        result.unsafeError().source = LabelledFailure.init(result.unsafeError().source, name, msg)
+        result.unsafeError().source = LabelledFailure.init(result.unsafeError().source, name, msg.replace(
+          "{lineInfo}",
+          pretty(result.unsafeError().source.lineInfo)
+        ))
 
     functionName
 
